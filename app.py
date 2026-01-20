@@ -2,6 +2,7 @@
 # Macroeconomía – CEU.UIA
 # Tipo de cambio (A3500) + Bandas 2025/2026
 # Tasa de interés (BCRA Monetarias id 145)
+# Precios (IPC INDEC FTP: selector por división)
 # ============================================================
 
 import warnings
@@ -107,29 +108,65 @@ def get_rem_last():
 
 
 # ----------------------------
-# IPC (datos.gob.ar)
+# IPC (INDEC FTP) – dataset completo + serie nacional nivel general
 # ----------------------------
-@st.cache_data(ttl=24 * 60 * 60)
-def get_ipc():
-    url = (
-        "https://infra.datos.gob.ar/catalog/sspm/dataset/145/distribution/145.3/download/"
-        "indice-precios-al-consumidor-nivel-general-base-diciembre-2016-mensual.csv"
-    )
+@st.cache_data(ttl=12 * 60 * 60)
+def get_ipc_indec_full() -> pd.DataFrame:
+    """
+    Descarga el CSV de INDEC por divisiones.
+    Importante: sep=';' y decimal=',' (las variaciones vienen con coma decimal).
+    Devuelve columnas originales con tipos básicos y Periodo en datetime.
+    """
+    url = "https://www.indec.gob.ar/ftp/cuadros/economia/serie_ipc_divisiones.csv"
+    try:
+        df = pd.read_csv(url, sep=";", decimal=",", encoding="utf-8")
+    except UnicodeDecodeError:
+        df = pd.read_csv(url, sep=";", decimal=",", encoding="latin1")
+
+    # Tipos
+    df["Codigo"] = pd.to_numeric(df["Codigo"], errors="coerce")
+    df["Periodo"] = pd.to_datetime(df["Periodo"].astype(str), format="%Y%m", errors="coerce")
+
+    # Strings
+    for c in ["Descripcion", "Clasificador", "Region"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+
+    # Numericos (ya con decimal=",", pero por las dudas)
+    for c in ["Indice_IPC", "v_m_IPC", "v_i_a_IPC"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     return (
-        pd.read_csv(url)
-        .rename(
-            columns={
-                "indice_tiempo": "Date",
-                "ipc_ng_nacional_tasa_variacion_mensual": "v_m_CPI",
-            }
-        )[["Date", "v_m_CPI"]]
-        .assign(
-            Date=lambda x: pd.to_datetime(x["Date"], errors="coerce"),
-            Period=lambda x: x["Date"].dt.to_period("M"),
-        )
+        df.dropna(subset=["Periodo"])
+        .sort_values("Periodo")
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(ttl=12 * 60 * 60)
+def get_ipc_nacional_nivel_general() -> pd.DataFrame:
+    """
+    Para bandas 2026: devuelve variación mensual en DECIMAL (ej 0.016),
+    con columnas Date, v_m_CPI, Period.
+    """
+    df = get_ipc_indec_full()
+
+    tmp = (
+        df[(df["Codigo"] == 0) & (df["Region"] == "Nacional")]
+        .copy()
+        .dropna(subset=["v_m_IPC"])
+        .rename(columns={"Periodo": "Date"})
+        .sort_values("Date")
+    )
+    tmp["Period"] = tmp["Date"].dt.to_period("M")
+    tmp["v_m_CPI"] = tmp["v_m_IPC"] / 100.0  # % -> decimal
+
+    return (
+        tmp[["Date", "v_m_CPI", "Period"]]
         .drop_duplicates("Period")
         .sort_values("Period")
+        .reset_index(drop=True)
     )
 
 
@@ -249,7 +286,12 @@ upper0 = 1400.0
 with st.spinner("Cargando datos..."):
     fx = get_a3500()
     rem = get_rem_last()
-    ipc = get_ipc()
+
+    # IPC para bandas (Nacional / Nivel general) usando INDEC FTP
+    ipc = get_ipc_nacional_nivel_general()
+
+    # Dataset completo para la sección "Precios"
+    ipc_full = get_ipc_indec_full()
 
     bands_2025 = build_bands_2025("2025-04-14", "2025-12-31", lower0, upper0)
     bands_2026 = build_bands_2026(bands_2025, rem, ipc)
@@ -326,17 +368,14 @@ with c_right:
     )
 
     fig_fx.update_layout(
-    title=None,
-    hovermode="x unified",
-    height=600,
-    margin=dict(t=30),
-    showlegend=True,
-)
-    fig_fx.update_xaxes(title_text="")           # 👈 mata el "undefined"
+        title=None,
+        hovermode="x unified",
+        height=600,
+        margin=dict(t=30),
+        showlegend=True,
+    )
+    fig_fx.update_xaxes(title_text="")  # 👈 mata el "undefined"
     fig_fx.update_yaxes(title_text="ARS / USD")
-
-
-    
 
     st.plotly_chart(fig_fx, use_container_width=True)
 
@@ -385,15 +424,14 @@ with c_right2:
         )
 
         fig_tasa.update_layout(
-        title=None,
-        hovermode="x unified",
-        height=450,
-        margin=dict(t=30),
-        showlegend=True,
+            title=None,
+            hovermode="x unified",
+            height=450,
+            margin=dict(t=30),
+            showlegend=True,
         )
-        fig_tasa.update_xaxes(title_text="")          # 👈 mata el "undefined"
+        fig_tasa.update_xaxes(title_text="")  # 👈 mata el "undefined"
         fig_tasa.update_yaxes(title_text="% TNA", ticksuffix="%")
-
 
         st.plotly_chart(fig_tasa, use_container_width=True)
 
@@ -404,3 +442,93 @@ if not tasa.empty:
         file_name="tasa_adelantos_id145.csv",
         mime="text/csv",
     )
+
+
+# ============================================================
+# SECCIÓN: Precios (IPC INDEC FTP con selector)
+# ============================================================
+st.divider()
+st.subheader("Precios")
+st.caption("Fuente: INDEC (IPC cobertura nacional – FTP, serie por divisiones)")
+
+ipc_nac = ipc_full[ipc_full["Region"] == "Nacional"].copy()
+
+if ipc_nac.empty:
+    st.warning("⚠️ No se pudo cargar el IPC (INDEC).")
+else:
+    # Selector (por Descripcion)
+    opciones = sorted(ipc_nac["Descripcion"].dropna().unique().tolist())
+
+    # Default: NIVEL GENERAL si existe
+    default_idx = 0
+    for i, v in enumerate(opciones):
+        if "NIVEL" in v.upper() and "GENERAL" in v.upper():
+            default_idx = i
+            break
+
+    c_sel, _ = st.columns([1, 3])
+    with c_sel:
+        desc_sel = st.selectbox(
+            "Seleccioná una división",
+            options=opciones,
+            index=default_idx,
+        )
+
+    serie = (
+        ipc_nac[ipc_nac["Descripcion"] == desc_sel]
+        .copy()
+        .sort_values("Periodo")
+        .dropna(subset=["v_m_IPC"])
+    )
+
+    c_left3, c_right3 = st.columns([1, 3], vertical_alignment="top")
+
+    with c_left3:
+        st.markdown(f"### {desc_sel}")
+        if serie.empty:
+            st.warning("Sin datos para el filtro elegido.")
+        else:
+            last_date_p = serie["Periodo"].iloc[-1]
+            last_vm = float(serie["v_m_IPC"].iloc[-1])
+
+            st.markdown("**Último dato (variación mensual)**")
+            st.markdown(
+                f"<div style='font-size:46px; font-weight:700; line-height:1.0'>{last_vm:,.1f}%</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"Mes: {pd.to_datetime(last_date_p).strftime('%b-%Y')}")
+
+    with c_right3:
+        if not serie.empty:
+            fig_ipc = go.Figure()
+            fig_ipc.add_trace(
+                go.Scatter(
+                    x=serie["Periodo"],
+                    y=serie["v_m_IPC"],
+                    mode="lines",
+                    name="v_m_IPC",
+                    connectgaps=True,
+                )
+            )
+
+            fig_ipc.update_layout(
+                title=None,
+                hovermode="x unified",
+                height=450,
+                margin=dict(t=30),
+                showlegend=False,
+            )
+            fig_ipc.update_xaxes(title_text="")  # evita "undefined"
+            fig_ipc.update_yaxes(title_text="Variación mensual (%)", ticksuffix="%")
+
+            st.plotly_chart(fig_ipc, use_container_width=True)
+
+    if not serie.empty:
+        st.download_button(
+            "Descargar CSV (IPC – selección actual)",
+            data=serie.rename(columns={"Periodo": "Date"})[
+                ["Date", "Descripcion", "v_m_IPC", "Indice_IPC", "v_i_a_IPC", "Region"]
+            ].to_csv(index=False).encode("utf-8"),
+            file_name="ipc_indec_seleccion.csv",
+            mime="text/csv",
+        )
