@@ -1,8 +1,9 @@
 # ============================================================
-# Macroeconomía – CEU.UIA
+# Macroeconomía
 # Tipo de cambio (A3500) + Bandas 2025/2026
 # Tasa de interés (BCRA Monetarias id 145)
-# Precios (IPC INDEC FTP: selector por división)
+# Precios (IPC INDEC FTP con selector)
+# + HOME con navegación
 # ============================================================
 
 import warnings
@@ -18,21 +19,31 @@ import plotly.graph_objects as go
 # ----------------------------
 # Configuración general
 # ----------------------------
-st.set_page_config(page_title="Macroeconomía - CEU.UIA", layout="wide")
-st.title("Macroeconomía – CEU.UIA")
-st.caption("Centro de Estudios de la Unión Industrial Argentina")
+st.set_page_config(page_title="Macroeconomía", layout="wide")
+st.title("Macroeconomía")
 
 
 # ----------------------------
+# Navegación
+# ----------------------------
+if "section" not in st.session_state:
+    st.session_state.section = "home"
+
+params = st.query_params
+if "section" in params:
+    st.session_state.section = params["section"]
+
+
+# ============================================================
 # A3500 – API BCRA (idVariable = 84)
-# ----------------------------
+# ============================================================
 @st.cache_data(ttl=60 * 60)
 def get_a3500() -> pd.DataFrame:
     url = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/84"
     params = {"Limit": 1000, "Offset": 0}
     data = []
 
-    for _ in range(3):  # hasta 3 intentos
+    for _ in range(3):
         try:
             while True:
                 r = requests.get(url, params=params, timeout=10, verify=False)
@@ -53,17 +64,12 @@ def get_a3500() -> pd.DataFrame:
                 params["Offset"] += params["Limit"]
                 if params["Offset"] >= meta["count"]:
                     break
-
             break
-
         except requests.exceptions.RequestException:
             pass
 
     if not data:
-        st.warning(
-            "⚠️ No se pudo conectar con la API del BCRA (A3500). "
-            "Se muestran solo las bandas."
-        )
+        st.warning("⚠️ No se pudo conectar con la API del BCRA (A3500).")
         return pd.DataFrame(columns=["Date", "FX"])
 
     df = pd.DataFrame(data)
@@ -79,9 +85,9 @@ def get_a3500() -> pd.DataFrame:
     )
 
 
-# ----------------------------
-# REM (última publicación)
-# ----------------------------
+# ============================================================
+# REM – última publicación
+# ============================================================
 @st.cache_data(ttl=60 * 60)
 def get_rem_last():
     url = (
@@ -107,35 +113,25 @@ def get_rem_last():
     )
 
 
-# ----------------------------
-# IPC (INDEC FTP) – dataset completo + serie nacional nivel general
-# ----------------------------
+# ============================================================
+# IPC – INDEC FTP (completo)
+# ============================================================
 @st.cache_data(ttl=12 * 60 * 60)
 def get_ipc_indec_full() -> pd.DataFrame:
-    """
-    Descarga el CSV de INDEC por divisiones.
-    Importante: sep=';' y decimal=',' (las variaciones vienen con coma decimal).
-    Devuelve columnas originales con tipos básicos y Periodo en datetime.
-    """
     url = "https://www.indec.gob.ar/ftp/cuadros/economia/serie_ipc_divisiones.csv"
     try:
         df = pd.read_csv(url, sep=";", decimal=",", encoding="utf-8")
     except UnicodeDecodeError:
         df = pd.read_csv(url, sep=";", decimal=",", encoding="latin1")
 
-    # Tipos
     df["Codigo"] = pd.to_numeric(df["Codigo"], errors="coerce")
     df["Periodo"] = pd.to_datetime(df["Periodo"].astype(str), format="%Y%m", errors="coerce")
 
-    # Strings
     for c in ["Descripcion", "Clasificador", "Region"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
+        df[c] = df[c].astype(str).str.strip()
 
-    # Numericos (ya con decimal=",", pero por las dudas)
     for c in ["Indice_IPC", "v_m_IPC", "v_i_a_IPC"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
     return (
         df.dropna(subset=["Periodo"])
@@ -146,21 +142,16 @@ def get_ipc_indec_full() -> pd.DataFrame:
 
 @st.cache_data(ttl=12 * 60 * 60)
 def get_ipc_nacional_nivel_general() -> pd.DataFrame:
-    """
-    Para bandas 2026: devuelve variación mensual en DECIMAL (ej 0.016),
-    con columnas Date, v_m_CPI, Period.
-    """
     df = get_ipc_indec_full()
 
     tmp = (
         df[(df["Codigo"] == 0) & (df["Region"] == "Nacional")]
-        .copy()
         .dropna(subset=["v_m_IPC"])
         .rename(columns={"Periodo": "Date"})
         .sort_values("Date")
     )
     tmp["Period"] = tmp["Date"].dt.to_period("M")
-    tmp["v_m_CPI"] = tmp["v_m_IPC"] / 100.0  # % -> decimal
+    tmp["v_m_CPI"] = tmp["v_m_IPC"] / 100.0
 
     return (
         tmp[["Date", "v_m_CPI", "Period"]]
@@ -170,9 +161,9 @@ def get_ipc_nacional_nivel_general() -> pd.DataFrame:
     )
 
 
-# ----------------------------
-# Bandas 2025
-# ----------------------------
+# ============================================================
+# Bandas 2025 / 2026
+# ============================================================
 def build_bands_2025(start, end, lower0, upper0):
     g_up = (1 + 0.01) ** (1 / 30)
     g_dn = (1 - 0.01) ** (1 / 30)
@@ -189,9 +180,6 @@ def build_bands_2025(start, end, lower0, upper0):
     )
 
 
-# ----------------------------
-# Bandas 2026 (inflación t−2)
-# ----------------------------
 def build_bands_2026(bands_2025, rem, ipc):
     rem_m = rem.assign(Period=rem["Date"].dt.to_period("M"))[["Period", "v_m_REM"]]
     m = ipc.merge(rem_m, on="Period", how="outer").sort_values("Period")
@@ -221,44 +209,14 @@ def build_bands_2026(bands_2025, rem, ipc):
     return cal[["Date", "lower", "upper"]]
 
 
-# ----------------------------
-# Tasas – BCRA Monetarias (id variable)
-# ----------------------------
+# ============================================================
+# Tasas – BCRA Monetarias
+# ============================================================
 @st.cache_data(ttl=60 * 60)
 def get_monetaria_serie(id_variable: int) -> pd.DataFrame:
     url = f"https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{id_variable}"
-    params = {"Limit": 1000, "Offset": 0}
-    data = []
-
-    for _ in range(3):
-        try:
-            while True:
-                r = requests.get(url, params=params, timeout=10, verify=False)
-                r.raise_for_status()
-                payload = r.json()
-
-                results = payload.get("results", [])
-                if not results:
-                    break
-
-                detalle = results[0].get("detalle", [])
-                if not detalle:
-                    break
-
-                data.extend(detalle)
-
-                meta = payload["metadata"]["resultset"]
-                params["Offset"] += params["Limit"]
-                if params["Offset"] >= meta["count"]:
-                    break
-
-            break
-
-        except requests.exceptions.RequestException:
-            pass
-
-    if not data:
-        return pd.DataFrame(columns=["Date", "value"])
+    r = requests.get(url, timeout=10, verify=False)
+    data = r.json()["results"][0]["detalle"]
 
     df = pd.DataFrame(data)
     df["Date"] = pd.to_datetime(df["fecha"], errors="coerce")
@@ -273,262 +231,220 @@ def get_monetaria_serie(id_variable: int) -> pd.DataFrame:
     )
 
 
-# ----------------------------
-# Parámetros fijos
-# ----------------------------
-lower0 = 1000.0
-upper0 = 1400.0
+# ============================================================
+# HOME
+# ============================================================
+if st.session_state.section == "home":
 
+    st.markdown(
+        """
+        <style>
+          /* Oculta SOLO el título/caption global en Home (sin matar textos internos) */
+          div[data-testid="stAppViewContainer"] h1 { display:none; }
+          div[data-testid="stAppViewContainer"] .stCaption { display:none; }
 
-# ----------------------------
-# Ejecución
-# ----------------------------
-with st.spinner("Cargando datos..."):
-    fx = get_a3500()
-    rem = get_rem_last()
+          /* Fondo gris claro */
+          [data-testid="stAppViewContainer"] { background: #f2f4f7; }
 
-    # IPC para bandas (Nacional / Nivel general) usando INDEC FTP
-    ipc = get_ipc_nacional_nivel_general()
+          /* Contenedor centrado */
+          .home-wrap{
+            max-width: 980px;
+            margin: 0 auto;
+            padding-top: 10px;
+            text-align: center;
+          }
 
-    # Dataset completo para la sección "Precios"
-    ipc_full = get_ipc_indec_full()
+          .home-title{
+            font-size: 44px;
+            font-weight: 800;
+            color: #0b2b4c;
+            margin-bottom: 10px;
+          }
 
-    bands_2025 = build_bands_2025("2025-04-14", "2025-12-31", lower0, upper0)
-    bands_2026 = build_bands_2026(bands_2025, rem, ipc)
+          .home-subtitle{
+            font-size: 18px;
+            color: #243447;
+            margin-bottom: 28px;
+          }
 
-    bands = (
-        pd.concat([bands_2025, bands_2026], ignore_index=True)
-        .sort_values("Date")
-        .reset_index(drop=True)
+          /* Cards SOLO para botones dentro de .home-cards */
+          .home-cards div.stButton > button{
+            width: 100% !important;
+            background: #dbeafe !important;
+            border: 1px solid rgba(11,43,76,0.18) !important;
+            border-radius: 18px !important;
+            padding: 18px 18px !important;
+            height: 90px !important;
+            box-shadow: 0 8px 22px rgba(0,0,0,0.06) !important;
+            transition: all 0.15s ease-in-out !important;
+          }
+
+          .home-cards div.stButton > button:hover{
+            transform: translateY(-2px);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.10) !important;
+            border-color: rgba(11,43,76,0.30) !important;
+          }
+
+          /* Texto (emoji + nombre) */
+          .home-cards div.stButton > button{
+            color: #0b2b4c !important;
+            font-weight: 800 !important;
+            font-size: 20px !important;
+          }
+
+          @media (max-width: 900px){
+            .home-title{ font-size: 36px; }
+          }
+        </style>
+
+        <div class="home-wrap">
+          <div class="home-title">Macroeconomía</div>
+          <div class="home-subtitle">Seleccioná una variable</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    fx["Date"] = pd.to_datetime(fx["Date"], errors="coerce")
-    bands["Date"] = pd.to_datetime(bands["Date"], errors="coerce")
+    # Centrado de las cards
+    left_pad, mid, right_pad = st.columns([1, 6, 1])
+    with mid:
+        st.markdown('<div class="home-cards">', unsafe_allow_html=True)
 
-    fx = (
-        fx.dropna(subset=["Date", "FX"])
-        .drop_duplicates(subset=["Date"])
-        .sort_values("Date")
-        .reset_index(drop=True)
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            if st.button("💱  Tipo de cambio", use_container_width=True):
+                st.session_state.section = "fx"
+                st.rerun()
+
+        with c2:
+            if st.button("📈  Tasa de interés", use_container_width=True):
+                st.session_state.section = "tasa"
+                st.rerun()
+
+        with c3:
+            if st.button("🛒  Precios", use_container_width=True):
+                st.session_state.section = "precios"
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:100px'></div>", unsafe_allow_html=True)
+
+        logo_col = st.columns([2, 1, 2])
+        with logo_col[1]:
+            st.image(
+            "assets/logo_ceu.png",
     )
 
-    bands = (
-        bands.dropna(subset=["Date", "lower", "upper"])
-        .drop_duplicates(subset=["Date"])
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
-
-    df = bands.merge(fx, on="Date", how="left")
+    
 
 
 # ============================================================
-# SECCIÓN: Tipo de cambio
+# SECCIÓN: TIPO DE CAMBIO
 # ============================================================
-st.divider()
-st.subheader("Tipo de cambio")
+if st.session_state.section == "fx":
 
-fx_obs = df.dropna(subset=["FX"]).sort_values("Date")
+    st.divider()
+    if st.button("← Volver al inicio"):
+        st.session_state.section = "home"
+        st.rerun()
 
-c_left, c_right = st.columns([1, 3], vertical_alignment="top")
+    with st.spinner("Cargando datos..."):
+        fx = get_a3500()
+        rem = get_rem_last()
+        ipc = get_ipc_nacional_nivel_general()
 
-with c_left:
-    st.markdown("### Tipo de Cambio Mayorista")
-    if fx_obs.empty:
-        st.warning("Sin datos A3500")
-    else:
-        last_date = fx_obs["Date"].iloc[-1]
-        last_fx = float(fx_obs["FX"].iloc[-1])
+        bands_2025 = build_bands_2025("2025-04-14", "2025-12-31", 1000.0, 1400.0)
+        bands_2026 = build_bands_2026(bands_2025, rem, ipc)
+        bands = pd.concat([bands_2025, bands_2026]).sort_values("Date")
 
-        st.markdown("**Último dato**")
+        df = bands.merge(fx, on="Date", how="left")
+
+    st.subheader("Tipo de cambio")
+
+    c_left, c_right = st.columns([1, 3])
+
+    with c_left:
+        last_fx = df["FX"].dropna().iloc[-1]
         st.markdown(
-            f"<div style='font-size:46px; font-weight:700; line-height:1.0'>{last_fx:,.0f}</div>",
+            f"<div style='font-size:46px; font-weight:700'>{last_fx:,.0f}</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"Fecha: {pd.to_datetime(last_date).date().isoformat()}")
 
-with c_right:
-    fig_fx = go.Figure()
-
-    fig_fx.add_trace(
-        go.Scatter(x=df["Date"], y=df["upper"], name="Banda superior", line=dict(dash="dash"))
-    )
-    fig_fx.add_trace(
-        go.Scatter(
-            x=df["Date"],
-            y=df["lower"],
-            name="Banda inferior",
-            line=dict(dash="dash"),
-            fill="tonexty",
-            fillcolor="rgba(0,0,0,0.08)",
-        )
-    )
-    fig_fx.add_trace(
-        go.Scatter(x=df["Date"], y=df["FX"], name="A3500", mode="lines", connectgaps=True)
-    )
-
-    fig_fx.update_layout(
-        title=None,
-        hovermode="x unified",
-        height=600,
-        margin=dict(t=30),
-        showlegend=True,
-    )
-    fig_fx.update_xaxes(title_text="")  # 👈 mata el "undefined"
-    fig_fx.update_yaxes(title_text="ARS / USD")
-
-    st.plotly_chart(fig_fx, use_container_width=True)
-
-st.download_button(
-    "Descargar CSV (Tipo de cambio)",
-    data=df[["Date", "FX", "lower", "upper"]].to_csv(index=False).encode("utf-8"),
-    file_name="tipo_de_cambio_bandas.csv",
-    mime="text/csv",
-)
-
-st.caption("Fuente: BCRA (A3500, API Monetarias id 84) | Bandas: REM + IPC (t−2)")
+    with c_right:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["upper"], name="Banda superior", line=dict(dash="dash")))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["lower"], name="Banda inferior", line=dict(dash="dash"), fill="tonexty"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["FX"], name="A3500"))
+        fig.update_layout(hovermode="x unified", height=600)
+        fig.update_yaxes(title_text="ARS / USD")
+        fig.update_xaxes(title_text="")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # ============================================================
-# SECCIÓN: Tasa de interés (id 145)
+# SECCIÓN: TASA DE INTERÉS
 # ============================================================
-st.divider()
-st.subheader("Tasa de interés")
-st.caption("Fuente: BCRA (API Monetarias, id 145)")
+if st.session_state.section == "tasa":
 
-tasa = get_monetaria_serie(145)
-tasa = tasa[tasa["Date"] >= pd.Timestamp("2025-01-01")].copy()
+    st.divider()
+    if st.button("← Volver al inicio"):
+        st.session_state.section = "home"
+        st.rerun()
 
-c_left2, c_right2 = st.columns([1, 3], vertical_alignment="top")
+    tasa = get_monetaria_serie(145)
 
-with c_left2:
-    st.markdown("### Tasa de Adelantos a CC de Empresa (% TNA)")
-    if tasa.empty:
-        st.warning("Sin datos")
-    else:
-        last_date_t = tasa["Date"].iloc[-1]
-        last_val_t = float(tasa["value"].iloc[-1])
+    c1, c2 = st.columns([1, 3])
 
-        st.markdown("**Último dato**")
+    with c1:
+        last_val = tasa["value"].iloc[-1]
         st.markdown(
-            f"<div style='font-size:46px; font-weight:700; line-height:1.0'>{last_val_t:,.0f}%</div>",
+            f"<div style='font-size:46px; font-weight:700'>{last_val:.1f}%</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"Fecha: {pd.to_datetime(last_date_t).date().isoformat()}")
 
-with c_right2:
-    if not tasa.empty:
-        fig_tasa = go.Figure()
-        fig_tasa.add_trace(
-            go.Scatter(x=tasa["Date"], y=tasa["value"], mode="lines", name="Tasa")
-        )
-
-        fig_tasa.update_layout(
-            title=None,
-            hovermode="x unified",
-            height=450,
-            margin=dict(t=30),
-            showlegend=True,
-        )
-        fig_tasa.update_xaxes(title_text="")  # 👈 mata el "undefined"
-        fig_tasa.update_yaxes(title_text="% TNA", ticksuffix="%")
-
-        st.plotly_chart(fig_tasa, use_container_width=True)
-
-if not tasa.empty:
-    st.download_button(
-        "Descargar CSV (Tasa)",
-        data=tasa.rename(columns={"value": "tasa"}).to_csv(index=False).encode("utf-8"),
-        file_name="tasa_adelantos_id145.csv",
-        mime="text/csv",
-    )
+    with c2:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=tasa["Date"], y=tasa["value"], name="Tasa"))
+        fig.update_layout(hovermode="x unified", height=450)
+        fig.update_yaxes(title_text="% TNA", ticksuffix="%")
+        fig.update_xaxes(title_text="")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # ============================================================
-# SECCIÓN: Precios (IPC INDEC FTP con selector)
+# SECCIÓN: PRECIOS
 # ============================================================
-st.divider()
-st.subheader("Precios")
-st.caption("Fuente: INDEC (IPC cobertura nacional – FTP, serie por divisiones)")
+if st.session_state.section == "precios":
 
-ipc_nac = ipc_full[ipc_full["Region"] == "Nacional"].copy()
+    st.divider()
+    if st.button("← Volver al inicio"):
+        st.session_state.section = "home"
+        st.rerun()
 
-if ipc_nac.empty:
-    st.warning("⚠️ No se pudo cargar el IPC (INDEC).")
-else:
-    # Selector (por Descripcion)
-    opciones = sorted(ipc_nac["Descripcion"].dropna().unique().tolist())
+    ipc = get_ipc_indec_full()
+    ipc = ipc[ipc["Region"] == "Nacional"]
 
-    # Default: NIVEL GENERAL si existe
-    default_idx = 0
-    for i, v in enumerate(opciones):
-        if "NIVEL" in v.upper() and "GENERAL" in v.upper():
-            default_idx = i
-            break
+    opciones = sorted(ipc["Descripcion"].unique())
+    default = opciones.index("Nivel general") if "Nivel general" in opciones else 0
+    desc = st.selectbox("Seleccioná una división", opciones, index=default)
 
-    c_sel, _ = st.columns([1, 3])
-    with c_sel:
-        desc_sel = st.selectbox(
-            "Seleccioná una división",
-            options=opciones,
-            index=default_idx,
+    serie = ipc[ipc["Descripcion"] == desc].dropna(subset=["v_m_IPC"])
+
+    c1, c2 = st.columns([1, 3])
+
+    with c1:
+        last_val = serie["v_m_IPC"].iloc[-1]
+        st.markdown(
+            f"<div style='font-size:46px; font-weight:700'>{last_val:.1f}%</div>",
+            unsafe_allow_html=True,
         )
 
-    serie = (
-        ipc_nac[ipc_nac["Descripcion"] == desc_sel]
-        .copy()
-        .sort_values("Periodo")
-        .dropna(subset=["v_m_IPC"])
-    )
+    with c2:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=serie["Periodo"], y=serie["v_m_IPC"], name="Variación mensual"))
+        fig.update_layout(hovermode="x unified", height=450)
+        fig.update_yaxes(title_text="Variación mensual (%)", ticksuffix="%")
+        fig.update_xaxes(title_text="")
+        st.plotly_chart(fig, use_container_width=True)
 
-    c_left3, c_right3 = st.columns([1, 3], vertical_alignment="top")
-
-    with c_left3:
-        st.markdown(f"### {desc_sel}")
-        if serie.empty:
-            st.warning("Sin datos para el filtro elegido.")
-        else:
-            last_date_p = serie["Periodo"].iloc[-1]
-            last_vm = float(serie["v_m_IPC"].iloc[-1])
-
-            st.markdown("**Último dato (variación mensual)**")
-            st.markdown(
-                f"<div style='font-size:46px; font-weight:700; line-height:1.0'>{last_vm:,.1f}%</div>",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"Mes: {pd.to_datetime(last_date_p).strftime('%b-%Y')}")
-
-    with c_right3:
-        if not serie.empty:
-            fig_ipc = go.Figure()
-            fig_ipc.add_trace(
-                go.Scatter(
-                    x=serie["Periodo"],
-                    y=serie["v_m_IPC"],
-                    mode="lines",
-                    name="v_m_IPC",
-                    connectgaps=True,
-                )
-            )
-
-            fig_ipc.update_layout(
-                title=None,
-                hovermode="x unified",
-                height=450,
-                margin=dict(t=30),
-                showlegend=False,
-            )
-            fig_ipc.update_xaxes(title_text="")  # evita "undefined"
-            fig_ipc.update_yaxes(title_text="Variación mensual (%)", ticksuffix="%")
-
-            st.plotly_chart(fig_ipc, use_container_width=True)
-
-    if not serie.empty:
-        st.download_button(
-            "Descargar CSV (IPC – selección actual)",
-            data=serie.rename(columns={"Periodo": "Date"})[
-                ["Date", "Descripcion", "v_m_IPC", "Indice_IPC", "v_i_a_IPC", "Region"]
-            ].to_csv(index=False).encode("utf-8"),
-            file_name="ipc_indec_seleccion.csv",
-            mime="text/csv",
-        )
